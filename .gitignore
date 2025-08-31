@@ -1,0 +1,6 @@
+# files with secret keys
+.env
+test/
+
+# some local files
+__pycache__

@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+httpx
+html2text
+python-multipart
+dotenv
