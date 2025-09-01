@@ -80,28 +80,26 @@ def sanitize_path(subject: str) -> str:
     """
     件名 -> 安全な相対パス
     - 先頭の [append] は除去（append 判定は呼び出し側で実施）
-    - 半角円記号(=バックスラッシュ) と スラッシュ をどちらも区切りとして扱う
-    - 余分な区切り/ドット/空要素を除去
+    - 全角の「￥」(U+FFE5) をディレクトリ区切りとみなす
+    - 半角スラッシュ '/' も許可
+    - 危険要素を除去してルート配下に制限
     - 拡張子が無い場合は .md を付与
     """
     subject = (subject or "").strip()
-    # [append] を除去（判定は外で済ませる）
     subject = re.sub(r'^\[append\]\s*', '', subject, flags=re.I)
 
-    # Windows/JP環境での「\（円記号）」も区切りとする
-    # 複数の \ / をまとめて 1 個の / に正規化
-    # 例: "notes\2025\09\idea" -> "notes/2025/09/idea"
-    normalized = re.sub(r'[\\/]+', '/', subject)
+    # 全角￥ → /
+    normalized = subject.replace("￥", "/")
+    # 半角スラッシュ連続もまとめて1つに
+    normalized = re.sub(r'/+', '/', normalized)
 
-    # 危険要素（., .., 空要素）を除去してルート配下にサンドボックス
+    # ".", "..", 空要素を除去
     parts = [p.strip() for p in normalized.split('/') if p not in ("", ".", "..")]
     path = "/".join(parts)
 
-    # 件名が空ならデフォルト名
     if not path:
         path = datetime.now(timezone.utc).strftime("notes/%Y-%m-%d-%H%M%S.md")
 
-    # 拡張子が無ければ .md を付与（1〜6文字の簡易拡張子を許容）
     if not re.search(r"\.[A-Za-z0-9]{1,6}$", path):
         path += ".md"
 
