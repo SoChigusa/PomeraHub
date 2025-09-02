@@ -1,5 +1,5 @@
 const WEBHOOK_URL = '<DEPLOY_URL>/gmail/inbound';
-const ALLOW_FROM = [<FROM ADDRESS>]; // 任意で制限
+const ALLOW_FROM = [<FROM ADDRESS>];
 
 function installTrigger() {
   ScriptApp.newTrigger('scanInbox').timeBased().everyMinutes(5).create();
@@ -8,35 +8,33 @@ function installTrigger() {
 function scanInbox() {
   const labelName = 'processed_by_PomeraHub';
   const processedLabel = getOrCreateLabel_(labelName);
-
-  // 受信トレイに来た新着のみ。すでに処理済みラベルが付いたスレッドは除外
   const query = 'in:inbox newer_than:10m -label:' + labelName;
   const threads = GmailApp.search(query, 0, 30);
 
   threads.forEach(thread => {
-    // すでにスレッドに処理済みラベルが付いていればスキップ
+
+    // skip when processed
     const hasProcessed = thread.getLabels().some(l => l.getName() === labelName);
     if (hasProcessed) return;
 
-    // スレッドの「最新1通のみ」を処理（多重POST防止＆“全部投げ”防止）
+    // most recent in the thread
     const messages = thread.getMessages();
     const msg = messages[messages.length - 1];
 
-    // 送信者フィルタ
+    // filter by sender
     const from = msg.getFrom();
     if (ALLOW_FROM.length && !isAllowed_(from)) return;
 
-    // 件名を整形：先頭の Re:/Fwd: を除去して [append] 判定が効くようにする
+    // Trim Re:/Fwd:
     let subject = (msg.getSubject() || '').replace(/^\s*(Re|Fwd):\s*/ig, '').trim();
 
     const payload = {
       from: from,
       to: msg.getTo(),
-      subject: subject,                              // ← 件名＝ファイルパス（[append] 先頭OK）
+      subject: subject,
       body_plain: msg.getPlainBody() || '',
       body_html: msg.getBody() || '',
       message_id: extractMessageId_(msg) || ('gmail-' + msg.getId()),
-      // branch を固定したいならここで指定も可: branch: 'main'
     };
 
     // Webhook POST
@@ -48,12 +46,11 @@ function scanInbox() {
       muteHttpExceptions: true
     });
 
+    // processed label when succeed
     const code = res.getResponseCode();
-    // 成功した時だけ“スレッド”に処理済みラベルを付ける（これが二重投稿防止の要）
     if (code >= 200 && code < 300) {
       thread.addLabel(processedLabel);
     } else {
-      // 失敗時はラベリングしない → 次回リトライで拾える
       console.log('Webhook failed:', code, res.getContentText());
     }
   });
@@ -69,7 +66,6 @@ function isAllowed_(from) {
 }
 
 function extractMessageId_(msg) {
-  // RFC 5322 Message-ID を生ヘッダから抜く（あればベスト、無ければ null）
   const raw = msg.getRawContent() || '';
   const m = raw.match(/Message-Id:\s*(<[^>]+>)/i);
   return m ? m[1].trim() : null;

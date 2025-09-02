@@ -11,24 +11,21 @@ from fastapi.responses import JSONResponse
 import httpx
 from email.utils import parseaddr
 
-# --- .env 読み込み ---
+# for local tests with .env
 from dotenv import load_dotenv
-load_dotenv()  # プロジェクトルートの .env を読み込む
+load_dotenv()
 
-# --- 環境変数 ---
-GITHUB_TOKEN        = os.environ["GITHUB_TOKEN"]         # Fine-grained PAT（Contents: RW）
+# environment variables
+GITHUB_TOKEN        = os.environ["GITHUB_TOKEN"]
 GITHUB_OWNER        = os.environ["GITHUB_OWNER"]
 GITHUB_REPO         = os.environ["GITHUB_REPO"]
 DEFAULT_BRANCH      = os.environ.get("DEFAULT_BRANCH", "main")
-ALLOWED_SENDERS_RAW = os.environ.get("ALLOWED_SENDERS", "")  # "you@ex.com,example.org" のようにカンマ区切り
+ALLOWED_SENDERS_RAW = os.environ.get("ALLOWED_SENDERS", "")
 ALLOWED_SENDERS     = [x.strip().lower() for x in ALLOWED_SENDERS_RAW.split(",") if x.strip()]
-
-# ★ 共有トークン（Apps Script から 'X-Webhook-Token' ヘッダで送る）
 GMAIL_WEBHOOK_TOKEN = os.environ["GMAIL_WEBHOOK_TOKEN"]
-
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
 
-# html2text は optional
+# optional
 try:
     import html2text
     h2t = html2text.HTML2Text()
@@ -39,29 +36,29 @@ except Exception:
 
 app = FastAPI(title="mail2git (Gmail webhook)")
 
-# ---------------- ユーティリティ ----------------
+# ---------------- utilities ----------------
 
 def sender_allowed(sender: str) -> bool:
     """
     ALLOWED_SENDERS:
-      - 空（未設定）なら全許可
-      - メールアドレス（exact match）
-      - ドメイン（example.com のように @無し）
+      - allows everyone if empty
+      - specify by email addresses（exact match）
+      - or by domains（w/o @）
     """
     if not ALLOWED_SENDERS:
         return True
 
     s = (sender or "").strip().lower()
 
-    # 1) メールアドレス本体を抽出
+    # extract email address
     _, addr = parseaddr(s)  # "Name <a@b>" -> ("Name", "a@b")
     addr = addr.lower()
 
-    # 2) ドメインも抽出
+    # extract domain
     m = re.search(r'@([^>]+)$', addr)
     dom = m.group(1) if m else ""
 
-    # 3) 許可判定（アドレス一致 or ドメイン一致）
+    # judge allowed
     for allowed in ALLOWED_SENDERS:
         a = allowed.strip().lower()
         if not a:
@@ -70,7 +67,6 @@ def sender_allowed(sender: str) -> bool:
             if addr == a:
                 return True
         else:
-            # ドメイン（@無し）での一致
             if dom == a:
                 return True
 
@@ -78,22 +74,17 @@ def sender_allowed(sender: str) -> bool:
 
 def sanitize_path(subject: str) -> str:
     """
-    件名 -> 安全な相対パス
-    - 先頭の [append] は除去（append 判定は呼び出し側で実施）
-    - 全角の「￥」(U+FFE5) をディレクトリ区切りとみなす
-    - 半角スラッシュ '/' も許可
-    - 危険要素を除去してルート配下に制限
-    - 拡張子が無い場合は .md を付与
+    title 2 path
+    - trim [append] at front
+    - use "￥" and '/' as directory separators
+    - automatic attachment '.md'
     """
     subject = (subject or "").strip()
     subject = re.sub(r'^\[append\]\s*', '', subject, flags=re.I)
 
-    # 全角￥ → /
+    # directory separators
     normalized = subject.replace("￥", "/")
-    # 半角スラッシュ連続もまとめて1つに
     normalized = re.sub(r'/+', '/', normalized)
-
-    # ".", "..", 空要素を除去
     parts = [p.strip() for p in normalized.split('/') if p not in ("", ".", "..")]
     path = "/".join(parts)
 
@@ -110,15 +101,14 @@ def html_to_markdown(html: str) -> str:
         return ""
     if h2t:
         return h2t.handle(html)
-    # 簡易フォールバック
     text = re.sub(r"<br\s*/?>", "\n", html, flags=re.I)
     text = re.sub(r"<[^>]+>", "", text)
     return unescape(text)
 
 async def github_get_file(path: str, branch: str):
     """
-    GitHub: 既存ファイルの SHA と テキスト内容を取得
-    戻り値: (sha or None, text or "")
+    GitHub: SHA and content of existing files
+    return (sha or None, text or "")
     """
     url = f"{GITHUB_API}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.githubjson"}
@@ -129,7 +119,6 @@ async def github_get_file(path: str, branch: str):
             j = r.json()
             sha = j.get("sha")
             content_b64 = j.get("content", "")
-            # APIは末尾に改行とbase64の改行が含まれる場合があるのでstripしない
             try:
                 text = base64.b64decode(content_b64.encode("ascii")).decode("utf-8")
             except Exception:
@@ -140,7 +129,7 @@ async def github_get_file(path: str, branch: str):
         raise HTTPException(r.status_code, f"GitHub get file error: {r.text}")
 
 async def github_put_file(path: str, content_text: str, message: str, branch: str, sha: str | None):
-    """GitHub: ファイル作成/更新"""
+    """GitHub: file creation/update"""
     url = f"{GITHUB_API}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     b64 = base64.b64encode(content_text.encode("utf-8")).decode("ascii")
@@ -154,7 +143,7 @@ async def github_put_file(path: str, content_text: str, message: str, branch: st
         return r.json()
 
 async def append_text_from_repo(path: str, branch: str) -> str:
-    """Raw URL から既存テキストを取得（append 用）"""
+    """Raw URL 2 text (prepared for append)"""
     raw_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{branch}/{path}"
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.get(raw_url)
@@ -162,7 +151,7 @@ async def append_text_from_repo(path: str, branch: str) -> str:
             return r.text
         return ""
 
-# ---------------- エンドポイント ----------------
+# ---------------- end-point ----------------
 
 @app.get("/health")
 async def health():
@@ -171,9 +160,8 @@ async def health():
 @app.post("/gmail/inbound")
 async def gmail_inbound(request: Request):
     """
-    Apps Script から JSON を受ける入口。
-    共有トークンを 'X-Webhook-Token' で検証し、件名→パス、本文→ファイル内容として GitHub にコミット。
-    期待する JSON:
+    end-point for json submission from GAS
+    expected JSON format:
     {
       "from": "Alice <alice@example.com>",
       "to": "notes@yourdomain",
@@ -181,15 +169,15 @@ async def gmail_inbound(request: Request):
       "body_plain": "Hello",
       "body_html": "<p>Hello</p>",
       "message_id": "<abcd@mail.gmail.com>",
-      "branch": "main"            # 任意（無ければ DEFAULT_BRANCH）
+      "branch": "main" # optional
     }
     """
-    # --- 共有トークン検証 ---
+    # --- token ---
     token = request.headers.get("x-webhook-token")
     if not token or token != GMAIL_WEBHOOK_TOKEN:
         raise HTTPException(403, "Invalid webhook token")
 
-    # --- JSON 受取 ---
+    # --- receive JSON ---
     try:
         data = await request.json()
     except Exception:
@@ -203,20 +191,20 @@ async def gmail_inbound(request: Request):
     msg_id   = (data.get("message_id") or "").strip()
     branch   = (data.get("branch") or DEFAULT_BRANCH).strip() or DEFAULT_BRANCH
 
-    # --- 送信者チェック（許可リスト） ---
+    # --- judge allowed senders ---
     if not sender_allowed(sender):
         raise HTTPException(403, f"Sender not allowed: {sender}")
 
-    # --- append モード判定 & パス決定 ---
+    # --- judge append + path ---
     append_mode = bool(re.match(r'^\[append\]\s*', subject, flags=re.I))
     path = sanitize_path(subject)
 
-    # --- 本文抽出（text/plain 優先、無ければ HTML -> MD）---
+    # --- extract main text ---
     content = body_p if body_p else html_to_markdown(body_h)
     if not content:
         content = "(empty)"
 
-    # --- 付加メタデータ（任意）---
+    # --- meta data ---
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     meta = (
         "\n\n---\n"
@@ -226,17 +214,16 @@ async def gmail_inbound(request: Request):
         # f"Message-Id: {msg_id or '(none)'}\n"
     )
 
-    # --- 既存 SHA 取得 ---
+    # --- existing SHA ---
     sha, base_text = await github_get_file(path, branch)
 
-    # --- 内容確定（追記 or 上書き/新規）---
+    # --- create, append, or overwrite ---
     if append_mode and sha:
         new_text = base_text.rstrip() + "\n\n" + content + meta + "\n"
         commit_msg = f"PomeraHub(append): {path} @ {now_utc}\n\nMessage-Id: {msg_id}"
         res = await github_put_file(path, new_text, commit_msg, branch, sha)
     else:
         text = content + meta + "\n"
-        # 既存があれば上書き（sha 指定）、無ければ新規
         commit_msg = f"PomeraHub: {path} @ {now_utc}\n\nMessage-Id: {msg_id}"
         res = await github_put_file(path, text, commit_msg, branch, sha)
 
